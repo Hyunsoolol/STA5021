@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Affine Linear Registration의 구현 이슈</title>
+  <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f5f5f5;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem 1rem;
+    }
+
+    #deck-wrapper {
+      width: 100%;
+      max-width: 760px;
+      background: #fff;
+      border-radius: 16px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.10);
+      overflow: hidden;
+    }
+
+    #deck { width: 100%; }
+
+    .slide {
+      display: none;
+      padding: 2.5rem 3rem 2rem;
+      min-height: 420px;
+      flex-direction: column;
+      justify-content: flex-start;
+      cursor: pointer;
+      user-select: none;
+      animation: fadeUp 0.3s ease;
+    }
+    .slide.active { display: flex; }
+
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .slide-title {
+      border-bottom: 1.5px solid #e5e7eb;
+      padding-bottom: 0.75rem;
+      margin-bottom: 1.5rem;
+      font-size: 17px;
+      font-weight: 500;
+      color: #111;
+    }
+
+    .hero {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      text-align: center;
+      padding: 1rem 0 2rem;
+    }
+    .hero h1 { font-size: 24px; font-weight: 500; color: #111; line-height: 1.4; }
+    .hero h2 { font-size: 15px; font-weight: 400; color: #6b7280; margin-top: 0.5rem; }
+    .hero .tag {
+      font-size: 13px;
+      color: #9ca3af;
+      margin-top: 2.5rem;
+      border-top: 0.5px solid #e5e7eb;
+      padding-top: 1rem;
+      width: 100%;
+      text-align: center;
+    }
+
+    ul { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 0.75rem; }
+    li { display: flex; gap: 10px; font-size: 14px; color: #1f2937; line-height: 1.65; }
+    li::before { content: "–"; color: #9ca3af; flex-shrink: 0; }
+    li strong { font-weight: 500; }
+
+    ol.steps { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; counter-reset: step-counter; }
+    ol.steps li { display: flex; gap: 10px; font-size: 13px; color: #374151; line-height: 1.65; }
+    ol.steps li::before { content: counter(step-counter); counter-increment: step-counter; background: #e5e7eb; color: #374151; font-size: 11px; font-weight: 500; min-width: 18px; height: 18px; border-radius: 50%; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 3px; }
+
+    .math-box {
+      background: #f9fafb;
+      border: 0.5px solid #e5e7eb;
+      border-radius: 10px;
+      padding: 1rem 1.5rem;
+      margin: 1rem 0;
+      text-align: center;
+      overflow-x: auto;
+    }
+
+    .callout {
+      background: #f0fdf4;
+      border-left: 3px solid #16a34a;
+      padding: 0.75rem 1rem;
+      border-radius: 0 8px 8px 0;
+      font-size: 13px;
+      color: #166534;
+      line-height: 1.65;
+      margin-top: 1rem;
+    }
+
+    .warn {
+      background: #fef2f2;
+      border-left: 3px solid #dc2626;
+      padding: 0.75rem 1rem;
+      border-radius: 0 8px 8px 0;
+      font-size: 13px;
+      color: #991b1b;
+      line-height: 1.65;
+    }
+
+    .insight {
+      background: #f8faff;
+      border-left: 3px solid #6b7280;
+      padding: 0.75rem 1rem;
+      border-radius: 0 8px 8px 0;
+      font-size: 13px;
+      color: #374151;
+      line-height: 1.7;
+      margin-bottom: 1rem;
+    }
+    .insight strong { font-weight: 500; color: #111; }
+
+    pre {
+      background: #f9fafb;
+      border: 0.5px solid #e5e7eb;
+      border-radius: 10px;
+      padding: 1rem 1.25rem;
+      font-family: 'Consolas', 'Fira Code', monospace;
+      font-size: 12px;
+      line-height: 1.65;
+      overflow-x: auto;
+      color: #1f2937;
+      margin-top: 0.75rem;
+    }
+
+    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 0.5rem; }
+    .card-sm {
+      background: #f9fafb;
+      border: 0.5px solid #e5e7eb;
+      border-radius: 10px;
+      padding: 0.85rem 1rem;
+    }
+    .card-sm .card-label {
+      font-size: 11px;
+      font-weight: 500;
+      color: #6b7280;
+      margin-bottom: 0.4rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .card-sm p { font-size: 13px; color: #374151; line-height: 1.6; }
+
+    .footer {
+      border-top: 0.5px solid #e5e7eb;
+      padding: 0.75rem 2rem;
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      background: #fafafa;
+    }
+    .footer .counter { font-size: 12px; color: #9ca3af; }
+  </style>
+</head>
+<body>
+
+<div id="deck-wrapper">
+  <div id="deck">
+
+    <div class="slide active" id="s0">
+      <div class="hero">
+        <h1>Affine Linear Registration의 구현 이슈</h1>
+        <h2>Numerical Stability &amp; Constraints</h2>
+        <div class="tag">통계학과 신현수</div>
+      </div>
+    </div>
+
+    <div class="slide" id="s1">
+      <div class="slide-title">1. 문제 설정</div>
+      <ul>
+        <li><strong>Shift Registration (기존):</strong> \(h(t) = t + \delta\)</li>
+        <li><strong>Affine Warping (확장):</strong> \(h(t) = a + bt\)</li>
+      </ul>
+      <div class="math-box">\[ F_{\text{linear}}(a,b) = \int_{T_1}^{T_2} \{x(a+bt) - x_0(t)\}^2 \, dt \]</div>
+      <ul>
+        <li><strong>추정 방법:</strong> Newton-Raphson 알고리즘으로 \((a, b)\)를 반복 추정</li>
+      </ul>
+    </div>
+
+    <div class="slide" id="s2">
+      <div class="slide-title">2. 구현 이슈 1 — 시간 순서 보존</div>
+      <ul>
+        <li>Warping 함수 \(h(t) = a + bt\)의 기울기: \(h'(t) = b\)</li>
+        <li><strong>수학적 제약:</strong> 시간은 역행할 수 없으므로 반드시 \(b > 0\)을 만족해야 함</li>
+      </ul>
+      <div class="warn" style="margin-top:1rem;">
+        Newton-Raphson의 full step 적용 시 \(b \le 0\)이 되어 시간 순서가 역전되는 문제 발생 가능
+      </div>
+      <div style="text-align:center; margin-top:1rem;">
+        <img src="newton_b_negative.png" alt="b < 0 시각화" style="width:60%; border-radius:8px; border:0.5px solid #e5e7eb;">
+      </div>
+    </div>
+
+    <div class="slide" id="s3">
+      <div class="slide-title">3. 해결책 — Step-halving</div>
+      <div class="insight">
+        Backtracking line search의 가장 단순한 형태로, 탐색 방향은 고정한 채 step size \(\alpha\)를 반복적으로 절반씩 줄여 제약 조건과 수렴을 동시에 보장하는 방법
+      </div>
+      <ul>
+        <li>Newton 방향은 유지하되, step size \(\alpha\)를 조절하여 제약 조건을 보장</li>
+      </ul>
+      <div class="math-box">\[\begin{pmatrix} a_{\text{new}} \\ b_{\text{new}} \end{pmatrix} = \begin{pmatrix} a \\ b \end{pmatrix} - \alpha H^{-1}g\]</div>
+      <ul>
+        <li>\(\alpha = 1\)에서 시작</li>
+        <li>\(b_{\text{new}} \le 0\)이거나 목적 함수 값이 증가하면 \(\alpha \leftarrow \alpha / 2\)</li>
+        <li>조건을 만족할 때까지 반복</li>
+      </ul>
+    </div>
+
+    <div class="slide" id="s4">
+      <div class="slide-title">4. 코드 구현 — Step-halving</div>
+      <div class="insight">
+        <p style="font-size:11px; font-weight:500; color:#6b7280; letter-spacing:0.06em; text-transform:uppercase; margin-bottom:0.5rem;">Step-halving 과정</p>
+        <p style="font-size:13px; color:#374151; line-height:1.9; margin:0;">
+          1. Newton이 제안한 방향과 크기 그대로 이동해본다<br>
+          2. 결과가 나쁘면 보폭을 절반으로 줄이고 다시 시도<br>
+          3. 괜찮아질 때까지 반복 &nbsp; \(\alpha = 1 \to 0.5 \to 0.25 \to \cdots\)
+        </p>
+      </div>
+      <p style="font-size:13px; color:#6b7280; margin-bottom:4px;">R 구현 예시</p>
+      <pre>
+# b > 0 제약 조건 및 Step-halving 구현
+anew <- a - stepsize * step[1]
+bnew <- b - stepsize * step[2]
+
+if (bnew <= 0) {
+  stepsize <- stepsize / 2
+  if (stepsize < 1e-6) break
+  next
+}</pre>
+    </div>
+
+    <div class="slide" id="s5">
+      <div class="slide-title">5. 구현 이슈 2 — Hessian의 수치적 불안정성</div>
+      <ul>
+        <li><strong>발생 조건:</strong> 곡선이 완만하거나 뚜렷한 특징(peak/valley)이 없는 경우</li>
+        <li><strong>결과:</strong> Hessian 행렬 \(H\)가 nearly singular에 가까워짐</li>
+      </ul>
+      <div class="warn" style="margin-top:1rem;">
+        \(H^{-1}\) 계산 시 수치 오차가 증폭되어 추정값이 발산하거나 수렴에 실패
+      </div>
+    </div>
+
+    <div class="slide" id="s6">
+      <div class="slide-title">6. 해결책 — Ridge Term</div>
+      <ul>
+        <li>Hessian의 대각 원소에 작은 상수 \(\epsilon\)을 더해 행렬을 양정치(positive definite)로 안정화</li>
+      </ul>
+      <div class="math-box">\[ H \leftarrow H + \epsilon I \]</div>
+      <p style="font-size:13px; color:#6b7280; margin-bottom:4px;">R 구현 예시</p>
+      <pre>
+H <- FLHess(t0, x0, t, x, a, b, ngrid = ngrid)
+H <- H + diag(1e-8, 2)  # 작은 ridge term 추가
+step <- drop(solve(H, g))</pre>
+    </div>
+
+    <div class="slide" id="s7">
+      <div class="slide-title">7. 결론</div>
+      <div class="two-col">
+        <div class="card-sm">
+          <div class="card-label">Step-halving</div>
+          <p>\(b > 0\) 제약을 보장하여 수학적 타당성 확보 — Newton 방향을 유지하면서 단계적으로 step size를 줄임</p>
+        </div>
+        <div class="card-sm">
+          <div class="card-label">Ridge Term</div>
+          <p>Hessian이 nearly singular일 때 \(\epsilon I\)를 더해 역행렬 계산을 안정화하고 발산을 억제</p>
+        </div>
+      </div>
+      <div class="callout">
+        최적화 알고리즘의 수렴만큼이나, 제약 조건과 수치적 안정성을 함께 다루는 것이 중요함
+      </div>
+    </div>
+
+    <div class="slide" id="s8">
+      <div class="hero">
+        <h1 style="font-size:36px;">Q &amp; A</h1>
+        <h2 style="margin-top:1rem;">감사합니다</h2>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="footer">
+    <span class="counter" id="ctr">1 / 9</span>
+  </div>
+</div>
+
+<script>
+  const slides = document.querySelectorAll('.slide');
+  const ctr = document.getElementById('ctr');
+  let cur = 0;
+
+  function go(n) {
+    slides[cur].classList.remove('active');
+    cur = Math.max(0, Math.min(slides.length - 1, n));
+    slides[cur].classList.add('active');
+    ctr.textContent = (cur + 1) + ' / ' + slides.length;
+    if (window.MathJax) MathJax.typesetPromise([slides[cur]]);
+  }
+
+  document.getElementById('deck').addEventListener('click', () => go(cur + 1));
+  document.addEventListener('keydown', e => {
+    if (['ArrowRight','ArrowDown',' ','Enter'].includes(e.key)) go(cur + 1);
+    else if (['ArrowLeft','ArrowUp','Backspace'].includes(e.key)) go(cur - 1);
+  });
+
+  if (window.MathJax) MathJax.typesetPromise();
+</script>
+
+</body>
+</html>
