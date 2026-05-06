@@ -1,0 +1,161 @@
+# =========================================================
+# Export figures for the Overleaf report
+# ---------------------------------------------------------
+# Run this AFTER generating poe_analysis_results.RData.
+# It creates the figures/ folder and saves all report figures as PDFs.
+# Then upload main.tex, references.bib, and the figures/ folder to Overleaf.
+# =========================================================
+
+required_packages <- c("dplyr", "ggplot2", "scales", "patchwork", "roahd")
+missing_pkgs <- required_packages[!vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)]
+if (length(missing_pkgs) > 0) {
+  stop("Missing required packages: ", paste(missing_pkgs, collapse = ", "))
+}
+
+library(dplyr)
+library(ggplot2)
+library(scales)
+library(patchwork)
+library(roahd)
+
+# Change this path if needed.
+rdata_path <- "poe_analysis_results.RData"
+if (!file.exists(rdata_path)) {
+  stop("Cannot find ", rdata_path, ". Put this script in the same folder as the RData file or edit rdata_path.")
+}
+
+load(rdata_path)
+dir.create("figures", showWarnings = FALSE)
+
+save_pdf <- function(plot_obj, filename, width = 7, height = 4) {
+  ggplot2::ggsave(file.path("figures", filename), plot_obj, width = width, height = height, device = "pdf")
+}
+
+# 1. Overall time series
+p01 <- ggplot(poe, aes(x = timestamp_utc, y = players_clean)) +
+  geom_line(color = "steelblue", alpha = 0.6, na.rm = TRUE) +
+  scale_y_continuous(labels = comma) +
+  scale_x_datetime(date_breaks = "3 months", date_labels = "%Y-%m") +
+  labs(x = NULL, y = "Concurrent players") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+save_pdf(p01, "fig01_overall_timeseries.pdf", width = 8, height = 4)
+
+# 2. Spaghetti plot
+p02 <- ggplot(spaghetti_df, aes(x = hour_decimal, y = log_players, group = date_utc)) +
+  geom_line(alpha = 0.05, color = "steelblue") +
+  scale_x_continuous(breaks = seq(0, 24, 3)) +
+  labs(x = "Hour of day (UTC)", y = "log(1 + players)") +
+  theme_minimal()
+save_pdf(p02, "fig02_spaghetti.pdf", width = 8, height = 4)
+
+# 3. Mean and variance function
+p_mean <- ggplot(mean_curve_df, aes(x = hour, y = mean)) +
+  geom_ribbon(aes(ymin = mean - sd, ymax = mean + sd), alpha = 0.3, fill = "steelblue") +
+  geom_line(color = "steelblue", linewidth = 1.2) +
+  scale_x_continuous(breaks = seq(0, 24, 4)) +
+  labs(x = "Hour of day (UTC)", y = "log(1 + players)", title = "Mean curve ± 1 SD") +
+  theme_minimal()
+
+p_var <- ggplot(mean_curve_df, aes(x = hour, y = variance)) +
+  geom_line(color = "darkblue", linewidth = 1.2) +
+  scale_x_continuous(breaks = seq(0, 24, 4)) +
+  labs(x = "Hour of day (UTC)", y = "Variance", title = "Variance function") +
+  theme_minimal()
+save_pdf(p_mean + p_var, "fig03_mean_variance.pdf", width = 9, height = 4)
+
+# 4. FPCA mean +/- FPCs
+p04 <- ggplot(fpc_plot_df, aes(x = hour, y = value, color = line)) +
+  geom_line(linewidth = 1) +
+  facet_wrap(~ fpc, scales = "free_y", ncol = 2) +
+  scale_color_manual(values = c("Mean" = "black", "+2SD" = "red", "-2SD" = "blue")) +
+  scale_x_continuous(breaks = seq(0, 24, 4)) +
+  labs(x = "Hour of day (UTC)", y = "log(1 + players)", color = NULL) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+save_pdf(p04, "fig04_fpca_pm.pdf", width = 9, height = 6)
+
+# 5. FPC score time series
+p_fpc1 <- ggplot(scores_df, aes(x = date, y = FPC1)) +
+  geom_line(color = "steelblue") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  scale_x_date(date_breaks = "3 months", date_labels = "%Y-%m") +
+  labs(x = NULL, y = "FPC1 score") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+p_fpc2 <- ggplot(scores_df, aes(x = date, y = FPC2)) +
+  geom_line(color = "darkred") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  scale_x_date(date_breaks = "3 months", date_labels = "%Y-%m") +
+  labs(x = NULL, y = "FPC2 score") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+save_pdf(p_fpc1 / p_fpc2, "fig05_fpca_scores_time.pdf", width = 9, height = 6)
+
+# 6. FoSR effects with confidence intervals
+p06 <- ggplot(beta_ci_df, aes(x = hour, y = estimate)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.3, fill = "steelblue") +
+  geom_line(color = "darkblue", linewidth = 1.2) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray40") +
+  facet_wrap(~ effect, scales = "free_y", ncol = 2) +
+  scale_x_continuous(breaks = seq(0, 24, 4)) +
+  labs(x = "Hour of day (UTC)", y = "Effect size") +
+  theme_minimal()
+save_pdf(p06, "fig06_fosr_effects_ci.pdf", width = 9, height = 6)
+
+# 7. Time-varying R2
+p07 <- ggplot(r2_df, aes(x = hour, y = r_squared)) +
+  geom_line(color = "darkgreen", linewidth = 1.2) +
+  scale_x_continuous(breaks = seq(0, 24, 3)) +
+  scale_y_continuous(limits = c(0, 1), labels = percent) +
+  labs(x = "Hour of day (UTC)", y = expression(R^2)) +
+  theme_minimal()
+save_pdf(p07, "fig07_timevarying_r2.pdf", width = 7, height = 4)
+
+# 8. Outliergram base plot
+pdf(file.path("figures", "fig08_outliergram.pdf"), width = 6, height = 5)
+invisible(roahd::outliergram(poe_fdata, display = TRUE))
+dev.off()
+
+# 9. MS plot custom visualization
+p09 <- ggplot(ms_df, aes(x = mean_outlyingness, y = var_outlyingness, color = is_outlier)) +
+  geom_point(alpha = 0.7) +
+  scale_color_manual(values = c("FALSE" = "gray70", "TRUE" = "red"), labels = c("Normal", "Outlier")) +
+  labs(x = "Mean outlyingness", y = "Variation outlyingness", color = NULL) +
+  theme_minimal()
+save_pdf(p09, "fig09_msplot.pdf", width = 6, height = 5)
+
+# 10. Outlier curves by type
+p10 <- ggplot() +
+  geom_line(data = poe_long %>% filter(!is_outlier),
+            aes(x = hour_decimal, y = log_players, group = date_utc),
+            color = "gray85", alpha = 0.05) +
+  geom_line(data = poe_long %>% filter(is_outlier),
+            aes(x = hour_decimal, y = log_players, group = date_utc, color = type),
+            alpha = 0.5, linewidth = 0.5) +
+  scale_x_continuous(breaks = seq(0, 24, 3)) +
+  scale_color_brewer(palette = "Set1") +
+  facet_wrap(~ plot_type, ncol = 3) +
+  labs(x = "Hour of day (UTC)", y = "log(1 + players)", color = NULL) +
+  theme_minimal() +
+  theme(legend.position = "none", strip.text = element_text(size = 9))
+save_pdf(p10, "fig10_outlier_types.pdf", width = 10, height = 6)
+
+# 11. Case study
+p11 <- ggplot() +
+  geom_line(data = case_data,
+            aes(x = hour_decimal, y = log_players, color = case_label),
+            linewidth = 1.2) +
+  geom_line(data = mean_ref_df,
+            aes(x = hour_decimal, y = log_players),
+            color = "gray40", linetype = "dashed", linewidth = 1) +
+  facet_wrap(~ case_label, ncol = 2) +
+  scale_x_continuous(breaks = seq(0, 24, 3)) +
+  scale_color_brewer(palette = "Set1") +
+  labs(x = "Hour of day (UTC)", y = "log(1 + players)") +
+  theme_minimal() +
+  theme(legend.position = "none")
+save_pdf(p11, "fig11_case_study.pdf", width = 9, height = 6)
+
+cat("All figures saved to ./figures\n")
