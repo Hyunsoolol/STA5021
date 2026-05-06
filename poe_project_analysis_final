@@ -1,0 +1,441 @@
+# =========================================================
+# Path of Exile FDA Project - Reproducible Analysis Script
+# ---------------------------------------------------------
+# This script:
+# 1) extracts the PoE player-count series from the Mendeley zip file,
+# 2) preprocesses the data into daily intraday curves,
+# 3) smooths the curves,
+# 4) runs FPCA,
+# 5) fits function-on-scalar regression,
+# 6) detects functional outliers,
+# 7) saves all analysis objects to an .RData file for the report.
+#
+# Open-data source used in this project:
+# Wannigamage et al. (2020), Mendeley Data, DOI: 10.17632/ycy3sy3vj2.1
+# =========================================================
+
+# -----------------------------
+# 0. Packages and configuration
+# -----------------------------
+required_packages <- c(
+  "readr", "dplyr", "lubridate", "tidyr", "ggplot2", "scales",
+  "zoo", "fda", "roahd", "fdaoutlier", "patchwork"
+)
+
+missing_pkgs <- required_packages[!vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)]
+if (length(missing_pkgs) > 0) {
+  stop(
+    "Missing required packages: ", paste(missing_pkgs, collapse = ", "),
+    "\nPlease install them before running this script."
+  )
+}
+
+library(readr)
+library(dplyr)
+library(lubridate)
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(zoo)
+library(fda)
+library(roahd)
+library(fdaoutlier)
+
+# ----- user-editable paths -----
+data_dir <- "c:/data/steam"                          # directory containing the zip file
+zip_file <- file.path(data_dir, "PlayerCountHistoryPart1.zip")
+app_id <- 238960L                         # Path of Exile app id
+output_rdata <- file.path(data_dir, "poe_analysis_results.RData")
+extract_dir <- file.path(data_dir, "extracted")
+
+# -----------------------------
+# 1. Extract and load raw data
+# -----------------------------
+if (!file.exists(zip_file)) {
+  stop("Zip file not found: ", zip_file)
+}
+
+dir.create(extract_dir, recursive = TRUE, showWarnings = FALSE)
+
+zip_files <- unzip(zip_file, list = TRUE)
+poe_file <- zip_files[grepl(as.character(app_id), zip_files$Name), , drop = FALSE]
+if (nrow(poe_file) == 0) {
+  stop("Could not find app id ", app_id, " inside zip file.")
+}
+
+unzip(zip_file, files = poe_file$Name[1], exdir = extract_dir)
+extracted_path <- file.path(extract_dir, poe_file$Name[1])
+
+poe_raw <- read_csv(extracted_path, show_col_types = FALSE)
+if (!all(c("Time", "Playercount") %in% names(poe_raw))) {
+  stop("Expected columns 'Time' and 'Playercount' were not found.")
+}
+
+# -----------------------------
+# 2. Preprocess (UTC-based)
+# -----------------------------
+poe <- poe_raw %>%
+  rename(
+    timestamp_utc = Time,
+    players = Playercount
+  ) %>%
+  mutate(
+    timestamp_utc = force_tz(timestamp_utc, tzone = "UTC"),
+    date_utc = as.Date(timestamp_utc),
+    hour_decimal = hour(timestamp_utc) + minute(timestamp_utc) / 60,
+    weekday = lubridate::wday(date_utc, label = TRUE, week_start = 1),
+    is_weekend = lubridate::wday(date_utc, week_start = 1) %in% c(6, 7),
+    # treat observed zeros as unavailable / maintenance-like observations
+    players_clean = if_else(is.na(players) | players == 0, NA_real_, players),
+    log_players = log1p(players_clean)
+  ) %>%
+  arrange(timestamp_utc)
+
+# remove days with >50% missing values
+# each day should have 288 observations on the 5-minute grid
+daily_na <- poe %>%
+  group_by(date_utc) %>%
+  summarise(n_NA = sum(is.na(log_players)), .groups = "drop")
+
+bad_dates <- daily_na %>%
+  filter(n_NA > 144) %>%
+  pull(date_utc)
+
+poe <- poe %>%
+  filter(!date_utc %in% bad_dates)
+
+# -----------------------------
+# 3. Build daily functional matrix
+# -----------------------------
+X_mat <- poe %>%
+  select(date_utc, hour_decimal, log_players) %>%
+  pivot_wider(names_from = hour_decimal, values_from = log_players, names_sort = TRUE) %>%
+  arrange(date_utc)
+
+date_vec <- X_mat$date_utc
+X_data <- as.matrix(X_mat[, -1])
+rownames(X_data) <- as.character(date_vec)
+t_grid <- as.numeric(colnames(X_data))
+
+# linear interpolation within each day
+X_data_imp <- t(apply(X_data, 1, function(row) {
+  zoo::na.approx(row, na.rm = FALSE, rule = 2)
+}))
+
+# helper long-format tables for plotting
+spaghetti_df <- poe %>%
+  filter(!is.na(log_players)) %>%
+  select(date_utc, hour_decimal, log_players)
+
+overall_ts_df <- poe %>%
+  select(timestamp_utc, players_clean)
+
+# -----------------------------
+# 4. Smooth daily curves
+# -----------------------------
+trapw <- function(tt) {
+  n <- length(tt)
+  c((tt[2] - tt[1]) / 2,
+    (tt[3:n] - tt[1:(n - 2)]) / 2,
+    (tt[n] - tt[n - 1]) / 2)
+}
+
+nbasis_curve <- 51
+bb_curve <- create.bspline.basis(rangeval = c(0, 24), nbasis = nbasis_curve, norder = 4)
+X_t <- t(X_data_imp)  # rows = time points, cols = days
+
+loglam <- seq(-2, 2, by = 0.25)
+gcv_values <- numeric(length(loglam))
+for (i in seq_along(loglam)) {
+  fdPar_i <- fdPar(bb_curve, Lfdobj = 2, lambda = 10^loglam[i])
+  smooth_i <- smooth.basis(t_grid, X_t, fdPar_i)
+  gcv_values[i] <- mean(smooth_i$gcv)
+}
+
+best_loglam <- loglam[which.min(gcv_values)]
+chosen_loglam <- best_loglam
+fdPar_best <- fdPar(bb_curve, Lfdobj = 2, lambda = 10^chosen_loglam)
+smooth_obj <- smooth.basis(t_grid, X_t, fdPar_best)
+poe_fd <- smooth_obj$fd
+y2cMap <- smooth_obj$y2cMap
+
+mean_fd <- mean.fd(poe_fd)
+var_bifd <- var.fd(poe_fd)
+var_diag <- diag(eval.bifd(t_grid, t_grid, var_bifd))
+mean_eval <- as.numeric(eval.fd(t_grid, mean_fd))
+
+mean_curve_df <- tibble(
+  hour = t_grid,
+  mean = mean_eval,
+  sd = sqrt(var_diag),
+  variance = var_diag
+)
+
+# -----------------------------
+# 5. FPCA
+# -----------------------------
+poe_pca <- pca.fd(
+  fdobj = poe_fd,
+  nharm = 4,
+  harmfdPar = fdPar(bb_curve, Lfdobj = 2, lambda = 1e-2)
+)
+
+scores <- poe_pca$scores
+colnames(scores) <- paste0("FPC", seq_len(ncol(scores)))
+scores_df <- data.frame(date = date_vec, scores, check.names = FALSE)
+
+fpc_var_table <- tibble(
+  FPC = paste0("FPC", 1:4),
+  varprop = poe_pca$varprop[1:4],
+  cumulative = cumsum(poe_pca$varprop)[1:4]
+)
+
+build_fpc_df <- function(k) {
+  mean_v <- as.numeric(eval.fd(t_grid, mean_fd))
+  fpc_v <- as.numeric(eval.fd(t_grid, poe_pca$harmonics[k]))
+  scl <- 2 * sqrt(poe_pca$values[k])
+  tibble(
+    hour = rep(t_grid, 3),
+    value = c(mean_v, mean_v + scl * fpc_v, mean_v - scl * fpc_v),
+    line = rep(c("Mean", "+2SD", "-2SD"), each = length(t_grid)),
+    fpc = paste0("FPC ", k, " (", round(poe_pca$varprop[k] * 100, 1), "%)")
+  )
+}
+fpc_plot_df <- bind_rows(lapply(1:4, build_fpc_df))
+
+# -----------------------------
+# 6. League metadata
+# -----------------------------
+league_dates <- data.frame(
+  league_name = c("Abyss", "Bestiary", "Incursion", "Delve",
+                  "Betrayal", "Synthesis", "Legion", "Blight",
+                  "Metamorph", "Delirium", "Harvest", "Heist"),
+  start_date = as.Date(c("2017-12-08", "2018-03-02", "2018-06-01", "2018-08-31",
+                         "2018-12-07", "2019-03-08", "2019-06-07", "2019-09-06",
+                         "2019-12-13", "2020-03-13", "2020-06-19", "2020-09-18"))
+)
+
+date_meta <- data.frame(date = date_vec) %>%
+  mutate(
+    weekday = lubridate::wday(date, label = TRUE, week_start = 1),
+    is_weekend = lubridate::wday(date, week_start = 1) %in% c(6, 7),
+    league_start = sapply(date, function(d) {
+      past_starts <- league_dates$start_date[league_dates$start_date <= d]
+      if (length(past_starts) == 0) return(NA)
+      max(past_starts)
+    }),
+    league_start = as.Date(league_start, origin = "1970-01-01"),
+    days_since_league = as.numeric(date - league_start),
+    is_league_day = days_since_league == 0,
+    is_league_week = days_since_league >= 0 & days_since_league <= 6,
+    is_league_month = days_since_league >= 0 & days_since_league <= 29
+  )
+
+scores_full <- scores_df %>%
+  left_join(date_meta, by = "date") %>%
+  mutate(
+    period = case_when(
+      is_league_day ~ "League day (0)",
+      days_since_league <= 6 ~ "Week 1 (1-6)",
+      days_since_league <= 29 ~ "Month 1 (7-29)",
+      days_since_league <= 60 ~ "Month 2 (30-59)",
+      TRUE ~ "Late (60+)"
+    ),
+    period = factor(period,
+                    levels = c("League day (0)", "Week 1 (1-6)",
+                               "Month 1 (7-29)", "Month 2 (30-59)", "Late (60+)"))
+  )
+
+# -----------------------------
+# 7. Function-on-scalar regression
+# -----------------------------
+beta_basis <- create.bspline.basis(rangeval = c(0, 24), nbasis = 21, norder = 4)
+beta_fdPar <- fdPar(beta_basis, Lfdobj = 2, lambda = 1)
+
+beta_list <- list(
+  intercept = beta_fdPar,
+  weekend = beta_fdPar,
+  league_day = beta_fdPar,
+  league_week1 = beta_fdPar,
+  league_month1 = beta_fdPar
+)
+
+xfdlist <- list(
+  intercept = rep(1, nrow(scores_full)),
+  weekend = as.numeric(scores_full$is_weekend),
+  league_day = as.numeric(scores_full$is_league_day),
+  league_week1 = as.numeric(scores_full$is_league_week & !scores_full$is_league_day),
+  league_month1 = as.numeric(scores_full$is_league_month & !scores_full$is_league_week)
+)
+
+fregress_result <- fRegress(
+  y = poe_fd,
+  xfdlist = xfdlist,
+  betalist = beta_list
+)
+
+beta_eval <- sapply(fregress_result$betaestlist, function(b) {
+  as.numeric(eval.fd(t_grid, b$fd))
+})
+if (is.vector(beta_eval)) {
+  beta_eval <- matrix(beta_eval, nrow = length(t_grid))
+}
+colnames(beta_eval) <- names(beta_list)
+
+beta_df <- data.frame(
+  hour = t_grid,
+  intercept = beta_eval[, "intercept"],
+  weekend = beta_eval[, "weekend"],
+  league_day = beta_eval[, "league_day"],
+  league_week1 = beta_eval[, "league_week1"],
+  league_month1 = beta_eval[, "league_month1"]
+)
+
+# standard errors and confidence intervals
+# note: this worked in the user's analysis environment
+
+y_hat_eval <- eval.fd(t_grid, fregress_result$yhatfdobj)
+y_obs_eval <- eval.fd(t_grid, poe_fd)
+residuals_mat <- y_obs_eval - y_hat_eval
+SigmaE <- diag(apply(residuals_mat, 1, var))
+
+fregress_se <- fRegress.stderr(fregress_result, y2cMap, SigmaE)
+se_list <- list()
+effect_names <- names(beta_list)
+for (i in seq_along(fregress_se$betastderrlist)) {
+  se_obj <- fregress_se$betastderrlist[[i]]
+  if (inherits(se_obj, "fd")) {
+    se_vals <- as.numeric(eval.fd(t_grid, se_obj))
+  } else if (is.list(se_obj) && !is.null(se_obj$fd)) {
+    se_vals <- as.numeric(eval.fd(t_grid, se_obj$fd))
+  } else {
+    next
+  }
+  se_list[[effect_names[i]]] <- se_vals
+}
+
+beta_ci_df <- data.frame(
+  hour = rep(t_grid, 4),
+  effect = rep(c("Weekend", "League day", "League week 1", "League month 1"),
+               each = length(t_grid)),
+  estimate = c(beta_df$weekend,
+               beta_df$league_day,
+               beta_df$league_week1,
+               beta_df$league_month1),
+  se = c(se_list[["weekend"]],
+         se_list[["league_day"]],
+         se_list[["league_week1"]],
+         se_list[["league_month1"]])
+) %>%
+  mutate(
+    lower = estimate - 1.96 * se,
+    upper = estimate + 1.96 * se,
+    effect = factor(effect,
+                    levels = c("Weekend", "League day", "League week 1", "League month 1"))
+  )
+
+# time-varying R^2
+ss_total <- apply(y_obs_eval, 1, function(x) sum((x - mean(x))^2))
+ss_resid <- apply(residuals_mat, 1, function(x) sum(x^2))
+r_squared_t <- 1 - ss_resid / ss_total
+r2_df <- data.frame(hour = t_grid, r_squared = r_squared_t)
+r2_summary <- data.frame(
+  mean_R2 = mean(r_squared_t),
+  median_R2 = median(r_squared_t),
+  min_R2 = min(r_squared_t),
+  max_R2 = max(r_squared_t),
+  best_hour = t_grid[which.max(r_squared_t)],
+  worst_hour = t_grid[which.min(r_squared_t)]
+)
+
+# -----------------------------
+# 8. Functional outlier detection
+# -----------------------------
+poe_fdata <- fData(grid = t_grid, values = X_data_imp)
+out_result <- outliergram(poe_fdata, display = FALSE)
+outlier_idx <- out_result$ID_outliers
+outlier_og <- date_vec[outlier_idx]
+
+ms_result <- fdaoutlier::msplot(X_data_imp, data_depth = "MBD", n_projections = 200L, seed = 5021)
+outlier_ms <- date_vec[ms_result$outliers]
+
+outlier_strong <- intersect(outlier_og, outlier_ms)
+outlier_all <- union(outlier_og, outlier_ms)
+
+outlier_summary <- scores_full %>%
+  filter(date %in% outlier_all) %>%
+  mutate(
+    by_outliergram = date %in% outlier_og,
+    by_msplot = date %in% outlier_ms,
+    by_both = date %in% outlier_strong,
+    type = case_when(
+      is_league_day ~ "League start day",
+      is_league_week & !is_league_day ~ "League week 1",
+      FPC1 < -3 ~ "League fatigue (low)",
+      FPC1 > 3 & !is_league_week ~ "Mid-league spike (event)",
+      FPC2 > 1 ~ "Shape: event-like",
+      FPC2 < -1 ~ "Shape: maintenance",
+      TRUE ~ "Other"
+    )
+  )
+
+outlier_type_summary_df <- outlier_summary %>%
+  filter(by_both) %>%
+  count(type, name = "count") %>%
+  arrange(desc(count))
+
+ms_df <- data.frame(
+  date = date_vec,
+  mean_outlyingness = ms_result$mean_outlyingness,
+  var_outlyingness = ms_result$var_outlyingness,
+  is_outlier = seq_along(date_vec) %in% ms_result$outliers
+)
+
+outlier_type_map <- outlier_summary %>%
+  select(date, type) %>%
+  mutate(date_chr = as.character(date))
+
+poe_long <- poe %>%
+  filter(!is.na(log_players)) %>%
+  mutate(date_chr = as.character(date_utc),
+         is_outlier = date_chr %in% outlier_type_map$date_chr) %>%
+  left_join(select(outlier_type_map, date_chr, type), by = "date_chr") %>%
+  mutate(plot_type = ifelse(is_outlier, type, "Normal"))
+
+case_dates <- as.Date(c("2020-03-13", "2018-12-09", "2018-12-03", "2019-10-09"))
+case_labels <- c(
+  "2020-03-13: Delirium release + COVID lockdown",
+  "2018-12-09: Betrayal day 2 (peak)",
+  "2018-12-03: Pre-league fatigue (lowest)",
+  "2019-10-09: Maintenance day"
+)
+case_data <- poe %>%
+  filter(date_utc %in% case_dates, !is.na(log_players)) %>%
+  mutate(case_label = factor(case_labels[match(date_utc, case_dates)], levels = case_labels))
+mean_ref_df <- data.frame(hour_decimal = t_grid, log_players = mean_eval)
+
+# -----------------------------
+# 9. Save all results
+# -----------------------------
+save(
+  app_id, extracted_path, poe_raw, poe, daily_na, bad_dates,
+  X_mat, X_data, X_data_imp, X_t, date_vec, t_grid,
+  overall_ts_df, spaghetti_df, mean_curve_df,
+  nbasis_curve, bb_curve, loglam, gcv_values, best_loglam, chosen_loglam,
+  fdPar_best, smooth_obj, poe_fd, y2cMap, mean_fd, var_bifd, var_diag, mean_eval,
+  poe_pca, scores, scores_df, fpc_var_table, fpc_plot_df,
+  league_dates, date_meta, scores_full,
+  beta_basis, beta_df, beta_ci_df, fregress_result, fregress_se,
+  y_hat_eval, y_obs_eval, residuals_mat, r2_df, r2_summary,
+  poe_fdata, out_result, outlier_idx, outlier_og,
+  ms_result, outlier_ms, outlier_strong, outlier_all, ms_df,
+  outlier_summary, outlier_type_summary_df, poe_long,
+  case_dates, case_labels, case_data, mean_ref_df,
+  output_rdata,
+  file = output_rdata
+)
+
+cat("Saved analysis results to:\n", normalizePath(output_rdata, winslash = "/", mustWork = FALSE), "\n")
+
+setwd("C:\\Users\\shs7021\\Downloads\\poe_overleaf_project\\poe_overleaf_project")
+source("make_overleaf_figures.R")
