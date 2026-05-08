@@ -334,19 +334,111 @@ beta_ci_df <- data.frame(
                     levels = c("Weekend", "League day", "League week 1", "League month 1"))
   )
 
-# time-varying R^2
-ss_total <- apply(y_obs_eval, 1, function(x) sum((x - mean(x))^2))
-ss_resid <- apply(residuals_mat, 1, function(x) sum(x^2))
-r_squared_t <- 1 - ss_resid / ss_total
-r2_df <- data.frame(hour = t_grid, r_squared = r_squared_t)
-r2_summary <- data.frame(
-  mean_R2 = mean(r_squared_t),
-  median_R2 = median(r_squared_t),
-  min_R2 = min(r_squared_t),
-  max_R2 = max(r_squared_t),
-  best_hour = t_grid[which.max(r_squared_t)],
-  worst_hour = t_grid[which.min(r_squared_t)]
+# ---------------------------------------------------------
+# Derivative-based supplementary analysis
+# ---------------------------------------------------------
+
+# 1. First derivative of smoothed daily curves
+# Since t_grid is in hours, this is change in log(1 + players) per hour.
+poe_fd_d1 <- deriv.fd(poe_fd, Lfdobj = 1)
+
+d1_eval <- eval.fd(t_grid, poe_fd_d1)  # rows = time, cols = days
+
+deriv_mean_df <- data.frame(
+  hour = t_grid,
+  mean_deriv = rowMeans(d1_eval, na.rm = TRUE),
+  sd_deriv = apply(d1_eval, 1, sd, na.rm = TRUE)
 )
+
+# 2. FPCA on derivative curves
+poe_pca_d1 <- pca.fd(
+  fdobj = poe_fd_d1,
+  nharm = 4,
+  harmfdPar = fdPar(bb_curve, Lfdobj = 2, lambda = 1e-2)
+)
+
+deriv_fpc_var_table <- data.frame(
+  FPC = paste0("dFPC", 1:4),
+  varprop = poe_pca_d1$varprop[1:4],
+  cumulative = cumsum(poe_pca_d1$varprop)[1:4]
+)
+
+# 3. Function-on-scalar regression on derivative curves
+fregress_result_d1 <- fRegress(
+  y = poe_fd_d1,
+  xfdlist = xfdlist,
+  betalist = beta_list
+)
+
+beta_d1_eval <- sapply(fregress_result_d1$betaestlist, function(b) {
+  as.numeric(eval.fd(t_grid, b$fd))
+})
+
+if (is.vector(beta_d1_eval)) {
+  beta_d1_eval <- matrix(beta_d1_eval, nrow = length(t_grid))
+}
+
+colnames(beta_d1_eval) <- names(beta_list)
+
+beta_deriv_df <- data.frame(
+  hour = t_grid,
+  beta_d1_eval,
+  check.names = FALSE
+)
+
+beta_deriv_long <- beta_deriv_df %>%
+  tidyr::pivot_longer(
+    cols = -hour,
+    names_to = "effect",
+    values_to = "estimate"
+  )
+# Convert log-scale coefficient functions into approximate percent effects.
+# Since the response is log(1 + players), exp(beta(t)) - 1 gives
+# an approximate multiplicative effect on the original player-count scale.
+# ---------------------------------------------------------
+# Effect size summary on original percentage scale
+# ---------------------------------------------------------
+
+beta_effect_df <- beta_ci_df %>%
+  mutate(
+    pct_effect = 100 * (exp(estimate) - 1),
+    pct_lower  = 100 * (exp(lower) - 1),
+    pct_upper  = 100 * (exp(upper) - 1)
+  )
+
+effect_summary_pct <- beta_effect_df %>%
+  group_by(effect) %>%
+  summarise(
+    mean_pct = mean(pct_effect, na.rm = TRUE),
+    min_pct  = min(pct_effect, na.rm = TRUE),
+    min_hour = hour[which.min(pct_effect)],
+    max_pct  = max(pct_effect, na.rm = TRUE),
+    max_hour = hour[which.max(pct_effect)],
+    .groups = "drop"
+  )
+
+# ---------------------------------------------------------
+# Time-block summary of R^2
+# ---------------------------------------------------------
+
+r2_block_summary <- r2_df %>%
+  mutate(
+    time_block = case_when(
+      hour < 6  ~ "00--06",
+      hour < 12 ~ "06--12",
+      hour < 18 ~ "12--18",
+      TRUE      ~ "18--24"
+    ),
+    time_block = factor(time_block, levels = c("00--06", "06--12", "12--18", "18--24"))
+  ) %>%
+  group_by(time_block) %>%
+  summarise(
+    mean_R2 = mean(r_squared, na.rm = TRUE),
+    min_R2  = min(r_squared, na.rm = TRUE),
+    max_R2  = max(r_squared, na.rm = TRUE),
+    .groups = "drop"
+  )
+
 
 # -----------------------------
 # 8. Functional outlier detection
@@ -425,17 +517,22 @@ save(
   fdPar_best, smooth_obj, poe_fd, y2cMap, mean_fd, var_bifd, var_diag, mean_eval,
   poe_pca, scores, scores_df, fpc_var_table, fpc_plot_df,
   league_dates, date_meta, scores_full,
-  beta_basis, beta_df, beta_ci_df, fregress_result, fregress_se,
-  y_hat_eval, y_obs_eval, residuals_mat, r2_df, r2_summary,
+  beta_basis, beta_df, beta_ci_df, beta_effect_df, effect_summary_pct,
+  fregress_result, fregress_se,
+  y_hat_eval, y_obs_eval, residuals_mat, r2_df, r2_summary, r2_block_summary,
   poe_fdata, out_result, outlier_idx, outlier_og,
   ms_result, outlier_ms, outlier_strong, outlier_all, ms_df,
   outlier_summary, outlier_type_summary_df, poe_long,
   case_dates, case_labels, case_data, mean_ref_df,
   output_rdata,
+  # 미분 추가
+  poe_fd_d1, d1_eval, deriv_mean_df,
+  poe_pca_d1, deriv_fpc_var_table,
+  fregress_result_d1, beta_deriv_df, beta_deriv_long,
   file = output_rdata
 )
 
 cat("Saved analysis results to:\n", normalizePath(output_rdata, winslash = "/", mustWork = FALSE), "\n")
 
 setwd("C:\\Users\\shs7021\\Downloads\\poe_overleaf_project\\poe_overleaf_project")
-source("make_overleaf_figures.R")
+source("make_overleaf_figures_with_effect_summary.R")
