@@ -535,4 +535,4 @@ save(
 cat("Saved analysis results to:\n", normalizePath(output_rdata, winslash = "/", mustWork = FALSE), "\n")
 
 setwd("C:\\Users\\shs7021\\Downloads\\poe_overleaf_project\\poe_overleaf_project")
-source("make_overleaf_figures_with_effect_summary.R")
+source("make_overleaf_figures.R")
