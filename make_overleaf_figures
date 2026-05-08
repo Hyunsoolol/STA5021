@@ -100,7 +100,7 @@ p06 <- ggplot(beta_ci_df, aes(x = hour, y = estimate)) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "gray40") +
   facet_wrap(~ effect, scales = "free_y", ncol = 2) +
   scale_x_continuous(breaks = seq(0, 24, 4)) +
-  labs(x = "Hour of day (UTC)", y = "Effect size") +
+  labs(x = "Hour of day (UTC)", y = "Effect on log(1 + players)") +
   theme_minimal()
 save_pdf(p06, "fig06_fosr_effects_ci.pdf", width = 9, height = 6)
 
@@ -108,7 +108,10 @@ save_pdf(p06, "fig06_fosr_effects_ci.pdf", width = 9, height = 6)
 p07 <- ggplot(r2_df, aes(x = hour, y = r_squared)) +
   geom_line(color = "darkgreen", linewidth = 1.2) +
   scale_x_continuous(breaks = seq(0, 24, 3)) +
-  scale_y_continuous(limits = c(0, 1), labels = percent) +
+  scale_y_continuous(
+    limits = c(0.45, 0.70),
+    labels = scales::percent
+  ) +
   labs(x = "Hour of day (UTC)", y = expression(R^2)) +
   theme_minimal()
 save_pdf(p07, "fig07_timevarying_r2.pdf", width = 7, height = 4)
@@ -159,3 +162,72 @@ p11 <- ggplot() +
 save_pdf(p11, "fig11_case_study.pdf", width = 9, height = 6)
 
 cat("All figures saved to ./figures\n")
+
+# 6-1. FoSR effects converted to approximate percent change
+if (!exists("beta_effect_df")) {
+  beta_effect_df <- beta_ci_df %>%
+    mutate(
+      pct_effect = 100 * (exp(estimate) - 1),
+      pct_lower  = 100 * (exp(lower) - 1),
+      pct_upper  = 100 * (exp(upper) - 1)
+    )
+}
+
+p12 <- ggplot(beta_effect_df, aes(x = hour, y = pct_effect)) +
+  geom_ribbon(aes(ymin = pct_lower, ymax = pct_upper),
+              alpha = 0.25, fill = "steelblue") +
+  geom_line(color = "darkblue", linewidth = 1.2) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray40") +
+  facet_wrap(~ effect, scales = "free_y", ncol = 2) +
+  scale_x_continuous(breaks = seq(0, 24, 4)) +
+  labs(x = "Hour of day (UTC)", y = "Approx. percent change") +
+  theme_minimal()
+
+save_pdf(p12, "fig12_fosr_percent_effects.pdf", width = 9, height = 6)
+
+# Derivative mean curve
+# 3.1. 평균 미분 함수 그림
+p_deriv_mean <- ggplot(deriv_mean_df, aes(x = hour, y = mean_deriv)) +
+  geom_ribbon(
+    aes(ymin = mean_deriv - sd_deriv, ymax = mean_deriv + sd_deriv),
+    alpha = 0.25,
+    fill = "steelblue"
+  ) +
+  geom_line(color = "darkblue", linewidth = 1.2) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray40") +
+  scale_x_continuous(breaks = seq(0, 24, 4)) +
+  labs(
+    x = "Hour of day (UTC)",
+    y = "Derivative of log(1 + players)",
+    title = "Mean derivative curve ± 1 SD"
+  ) +
+  theme_minimal()
+
+# 3.2 미분 함수 회귀계수 그림
+# Derivative FoSR effects
+deriv_effect_df <- beta_deriv_long %>%
+  filter(effect != "intercept") %>%
+  mutate(
+    effect = recode(
+      effect,
+      "weekend" = "Weekend",
+      "league_day" = "League day",
+      "league_week1" = "League week 1",
+      "league_month1" = "League month 1"
+    ),
+    effect = factor(effect, levels = c("Weekend", "League day", "League week 1", "League month 1"))
+  )
+
+p_deriv_effects <- ggplot(deriv_effect_df, aes(x = hour, y = estimate)) +
+  geom_line(color = "darkblue", linewidth = 1.2) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray40") +
+  facet_wrap(~ effect, scales = "free_y", ncol = 2) +
+  scale_x_continuous(breaks = seq(0, 24, 4)) +
+  labs(
+    x = "Hour of day (UTC)",
+    y = "Effect on derivative"
+  ) +
+  theme_minimal()
+
+save_pdf(p_deriv_effects, "fig13_derivative_effects.pdf", width = 9, height = 6)
+save_pdf(p_deriv_mean, "fig12_derivative_mean.pdf", width = 7, height = 4)
